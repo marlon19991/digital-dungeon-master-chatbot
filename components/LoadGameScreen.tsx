@@ -66,7 +66,6 @@ const LoadGameScreen: React.FC<LoadGameScreenProps> = ({ onCharacterLoaded, onBa
         <div className="w-full max-w-md bg-slate-700 p-8 rounded-lg shadow-md text-center">
           <UserCircleIcon className="w-16 h-16 text-purple-400 mx-auto mb-4" />
           <p className="text-xl text-slate-200 mb-2">¡Bienvenido de nuevo, <span className="font-semibold text-yellow-300">{savedCharacter.name}</span>!</p>
-          {/* FIX: Use primaryClass instead of class */}
           <p className="text-md text-slate-300 mb-6">Tu viaje como <span className="font-medium text-purple-300">{savedCharacter.primaryClass}</span> ({savedCharacter.experienceLevel}) te espera.</p>
           <Button onClick={handleLoadCharacter} className="w-full bg-blue-600 hover:bg-blue-700 text-white">
             Cargar Aventura

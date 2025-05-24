@@ -1,6 +1,5 @@
 
 
-// FIX: Imported SpellSlots type from ../types
 import type { SceneNode, Character, GameScreenApi, SpellSlots } from './types';
 import { ITEMS_DATA } from './constants'; // No es necesario PREDEFINED_ENEMY_GROUPS aquí
 

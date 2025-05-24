@@ -4,11 +4,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { ExperienceLevel, type Character, type AbilityScores, type AbilityKey, BaseRaceDetail, BaseClassDetail, BaseBackgroundDetail, HitDice, ChampionAbilities, Spell, SpellSlots, PactMagicSlots } from '../types';
 import Button from './shared/Button';
-// FIX: Import newly added CheckCircleIcon, RefreshIcon, ChevronDownIcon, ChevronUpIcon
 import { UserPlusIcon, ArrowLeftIcon, SparklesIcon, CheckCircleIcon, RefreshIcon, ChevronDownIcon, ChevronUpIcon } from './shared/Icons';
 import { geminiService } from '../services/geminiService';
 import { STANDARD_ABILITY_SCORES, ABILITIES, ALL_RACES_ADVANCED, ALL_CLASSES_ADVANCED, ALL_BACKGROUNDS_ADVANCED, MAX_ABILITY_REROLLS, MULTICLASS_REQUIREMENTS, getAverageHitDieValue, SPELLS_DATA, ITEMS_DATA } from '../constants';
-import { calculateAbilityModifier, getCombinedProficiencies, calculateAc, getProficiencyBonus } from '../utils/characterUtils'; 
+import { calculateAbilityModifier, getCombinedProficiencies, calculateAc } from '../utils/characterUtils'; 
+import { manageCharacterSpellcasting } from '../utils/spellcastingUtils';
 
 interface CharacterCreationScreenProps {
   onCharacterCreated: (characterData: Omit<Character, 'id' | 'experienceLevel'>) => void;
@@ -84,133 +84,6 @@ Presenta tus sugerencias claramente y en español.`;
     }
   }, [experienceLevel, availableClasses]);
 
-  const initializeSpellcastingForCharacter = (
-    charData: Partial<Omit<Character, 'id' | 'experienceLevel'>>,
-    primaryClass: BaseClassDetail,
-    secondaryClass: BaseClassDetail | null,
-    level: number,
-    abilities: AbilityScores
-  ): Partial<Omit<Character, 'id' | 'experienceLevel'>> => {
-    const updatedData = { ...charData };
-    let knownSpells: Spell[] = [];
-    
-    // Primary Class Spellcasting
-    if (primaryClass.spellcasting) {
-      const scDef = primaryClass.spellcasting;
-      const primaryLevel = secondaryClass ? 1 : level; 
-      
-      updatedData.spellSlots = {};
-      if (scDef.slotProgressionTable[primaryLevel -1]) {
-        scDef.slotProgressionTable[primaryLevel-1].forEach((numSlots, slotLvlIndex) => {
-          if (numSlots > 0) {
-            updatedData.spellSlots![`level${slotLvlIndex + 1}` as keyof SpellSlots] = { max: numSlots, current: numSlots };
-          }
-        });
-      }
-
-      if (scDef.spellList) {
-        let spellsToLearn = 2; 
-         if (primaryClass.name === "Paladín" && primaryLevel >=2) { 
-             const chaMod = calculateAbilityModifier(abilities.cha);
-             spellsToLearn = Math.max(1, chaMod + Math.floor(primaryLevel/2));
-         } else if (primaryClass.name === "Clérigo" || primaryClass.name === "Druida") {
-            const wisMod = calculateAbilityModifier(abilities.wis);
-            spellsToLearn = Math.max(1, wisMod + primaryLevel); // Simplified, actual prepared is more complex
-         } else if (primaryClass.name === "Mago") {
-            const intMod = calculateAbilityModifier(abilities.int);
-            spellsToLearn = Math.max(1, intMod + primaryLevel); // Simplified known, actual is 6 + more per level
-         }
-
-
-        scDef.spellList.slice(0, spellsToLearn).forEach(spellName => {
-          if (SPELLS_DATA[spellName] && !knownSpells.find(s => s.name === spellName)) {
-            knownSpells.push(SPELLS_DATA[spellName]);
-          }
-        });
-      }
-    } else if (primaryClass.pactMagic) {
-      const pmDef = primaryClass.pactMagic;
-      const primaryLevel = secondaryClass ? 1 : level;
-
-      updatedData.pactMagicSlots = {
-        level: pmDef.slotLevelAtLevel(primaryLevel),
-        max: pmDef.slotsAtLevel(primaryLevel),
-        current: pmDef.slotsAtLevel(primaryLevel),
-      };
-      
-      const cantripsToLearn = pmDef.knownCantripsAtLevel(primaryLevel);
-      pmDef.spellList.filter(sn => SPELLS_DATA[sn]?.level === 0).slice(0, cantripsToLearn).forEach(spellName => {
-          if (SPELLS_DATA[spellName] && !knownSpells.find(s => s.name === spellName)) {
-            knownSpells.push(SPELLS_DATA[spellName]);
-          }
-      });
-
-      const spellsToLearn = pmDef.knownSpellsAtLevel(primaryLevel);
-      pmDef.spellList.filter(sn => SPELLS_DATA[sn]?.level > 0).slice(0, spellsToLearn).forEach(spellName => {
-          if (SPELLS_DATA[spellName] && !knownSpells.find(s => s.name === spellName)) {
-            knownSpells.push(SPELLS_DATA[spellName]);
-          }
-      });
-    }
-
-    if (secondaryClass) {
-      const secondaryLevel = 1; 
-      if (secondaryClass.spellcasting) {
-        const scDef = secondaryClass.spellcasting;
-        if (!updatedData.spellSlots) updatedData.spellSlots = {};
-        
-        if (scDef.slotProgressionTable[secondaryLevel-1]) {
-            scDef.slotProgressionTable[secondaryLevel-1].forEach((numSlots, slotLvlIndex) => {
-              if (numSlots > 0) {
-                const key = `level${slotLvlIndex + 1}` as keyof SpellSlots;
-                if (!updatedData.spellSlots![key]) updatedData.spellSlots![key] = { max: 0, current: 0};
-                updatedData.spellSlots![key]!.max += numSlots;
-                updatedData.spellSlots![key]!.current += numSlots;
-              }
-            });
-        }
-
-        if (scDef.spellList) {
-          let spellsToLearn = 1; 
-          if (secondaryClass.name === "Paladín" && secondaryLevel >=2) {
-             const chaMod = calculateAbilityModifier(abilities.cha);
-             spellsToLearn = Math.max(1, chaMod + Math.floor(secondaryLevel/2));
-          }
-          scDef.spellList.slice(0, spellsToLearn).forEach(spellName => {
-            if (SPELLS_DATA[spellName] && !knownSpells.find(s => s.name === spellName)) {
-              knownSpells.push(SPELLS_DATA[spellName]);
-            }
-          });
-        }
-
-      } else if (secondaryClass.pactMagic) {
-        const pmDef = secondaryClass.pactMagic;
-        if (!updatedData.pactMagicSlots) { 
-             updatedData.pactMagicSlots = {
-                level: pmDef.slotLevelAtLevel(secondaryLevel),
-                max: pmDef.slotsAtLevel(secondaryLevel),
-                current: pmDef.slotsAtLevel(secondaryLevel),
-            };
-        } 
-        const cantripsToLearn = pmDef.knownCantripsAtLevel(secondaryLevel);
-        pmDef.spellList.filter(sn => SPELLS_DATA[sn]?.level === 0).slice(0, cantripsToLearn).forEach(spellName => {
-            if (SPELLS_DATA[spellName] && !knownSpells.find(s => s.name === spellName)) {
-              knownSpells.push(SPELLS_DATA[spellName]);
-            }
-        });
-        const spellsToLearn = pmDef.knownSpellsAtLevel(secondaryLevel);
-        pmDef.spellList.filter(sn => SPELLS_DATA[sn]?.level > 0).slice(0, spellsToLearn).forEach(spellName => {
-            if (SPELLS_DATA[spellName] && !knownSpells.find(s => s.name === spellName)) {
-              knownSpells.push(SPELLS_DATA[spellName]);
-            }
-        });
-      }
-    }
-    updatedData.knownSpells = knownSpells.sort((a,b) => a.level - b.level || a.name.localeCompare(b.name));
-    return updatedData;
-  };
-
-
   const handleSubmitIntermediate = (e: React.FormEvent) => {
     e.preventDefault();
     if (name.trim() && characterClass) {
@@ -239,8 +112,7 @@ Presenta tus sugerencias claramente y en español.`;
       const championAbilities: ChampionAbilities | undefined = chosenClassDetails.name === 'Guerrero' ? { secondWindUsed: false, actionSurgeUsed: false } : undefined;
       const startingGold = defaultBackground.startingGold || 10;
 
-
-      let characterData: Omit<Character, 'id' | 'experienceLevel'> = {
+      let partialCharData: Partial<Character> = {
         name: name.trim(),
         primaryClass: characterClass,
         level: characterLevel,
@@ -260,7 +132,10 @@ Presenta tus sugerencias claramente y en español.`;
         gold: startingGold,
         xp: 0,
       };
-      characterData = initializeSpellcastingForCharacter(characterData, chosenClassDetails, null, characterLevel, defaultAbilities) as Omit<Character, 'id' | 'experienceLevel'>;
+      
+      const spellcastingData = manageCharacterSpellcasting(partialCharData, chosenClassDetails, null, characterLevel);
+      const characterData = { ...partialCharData, ...spellcastingData } as Omit<Character, 'id' | 'experienceLevel'>;
+      
       onCharacterCreated(characterData);
     }
   };
@@ -301,7 +176,7 @@ Presenta tus sugerencias claramente y en español.`;
         const championAbilities: ChampionAbilities | undefined = beginnerClassDetails.name === 'Guerrero' ? { secondWindUsed: false, actionSurgeUsed: false } : undefined;
         const startingGold = backgroundDetails.startingGold || 10;
 
-        let summaryData: Omit<Character, 'id' | 'experienceLevel'> = {
+        let partialSummaryData: Partial<Character> = {
             name: beginnerCharName.trim() || "Héroe sin Nombre",
             primaryClass: 'Guerrero',
             level: characterLevel,
@@ -321,7 +196,8 @@ Presenta tus sugerencias claramente y en español.`;
             gold: startingGold,
             xp: 0,
         };
-        summaryData = initializeSpellcastingForCharacter(summaryData, beginnerClassDetails, null, characterLevel, finalAbilities) as Omit<Character, 'id' | 'experienceLevel'>;
+        const spellcastingData = manageCharacterSpellcasting(partialSummaryData, beginnerClassDetails, null, characterLevel);
+        const summaryData = { ...partialSummaryData, ...spellcastingData } as Omit<Character, 'id' | 'experienceLevel'>;
         setBeginnerSummary(summaryData);
         setBeginnerStep('nameAndSummary');
       } else {
@@ -348,7 +224,7 @@ Presenta tus sugerencias claramente y en español.`;
       const championAbilities: ChampionAbilities | undefined = beginnerClassDetails.name === 'Guerrero' ? { secondWindUsed: false, actionSurgeUsed: false } : undefined;
       const startingGold = backgroundDetails.startingGold || 10;
       
-      let characterData: Omit<Character, 'id' | 'experienceLevel'> = {
+      let partialCharData: Partial<Character> = {
         ...beginnerSummary,
         name: beginnerCharName.trim(),
         abilities: finalAbilitiesWithHumanBonus,
@@ -363,7 +239,8 @@ Presenta tus sugerencias claramente y en español.`;
         gold: startingGold,
         xp: 0,
       };
-      characterData = initializeSpellcastingForCharacter(characterData, beginnerClassDetails, null, 1, finalAbilitiesWithHumanBonus) as Omit<Character, 'id' | 'experienceLevel'>;
+      const spellcastingData = manageCharacterSpellcasting(partialCharData, beginnerClassDetails, null, 1);
+      const characterData = { ...partialCharData, ...spellcastingData } as Omit<Character, 'id' | 'experienceLevel'>;
       onCharacterCreated(characterData);
     } else { setError("Ocurrió un error. Por favor, intenta reiniciar la creación del personaje."); }
   };
@@ -481,9 +358,12 @@ Presenta tus sugerencias claramente y en español.`;
 
     if (wantsMulticlass && selectedSecondaryClass) {
         characterLevel = 2;
+        // Level 1 HP for primary class (max hit die + CON)
         maxHp += primaryHitDie + conModifier;
-        maxHp += getAverageHitDieValue(selectedSecondaryClass.hitDie) + conModifier;
+        // Level 1 HP for secondary class (max hit die + CON)
+        maxHp += selectedSecondaryClass.hitDie + conModifier; 
     } else {
+        // Level 1 HP for single class
         maxHp = primaryHitDie + conModifier;
     }
 
@@ -497,7 +377,7 @@ Presenta tus sugerencias claramente y en español.`;
     const championAbilities: ChampionAbilities | undefined = selectedPrimaryClass.name === 'Guerrero' ? { secondWindUsed: false, actionSurgeUsed: false } : undefined;
     const startingGold = selectedBackground.startingGold || 10;
 
-    let characterData: Omit<Character, 'id' | 'experienceLevel'> = {
+    let partialCharData: Partial<Character> = {
         name: advancedCharName.trim(),
         race: selectedRace.name,
         primaryClass: selectedPrimaryClass.name,
@@ -525,7 +405,8 @@ Presenta tus sugerencias claramente y en español.`;
         gold: startingGold,
         xp: 0,
     };
-    characterData = initializeSpellcastingForCharacter(characterData, selectedPrimaryClass, wantsMulticlass ? selectedSecondaryClass : null, characterLevel, finalAbilities) as Omit<Character, 'id' | 'experienceLevel'>;
+    const spellcastingData = manageCharacterSpellcasting(partialCharData, selectedPrimaryClass, wantsMulticlass ? selectedSecondaryClass : null, characterLevel);
+    const characterData = { ...partialCharData, ...spellcastingData } as Omit<Character, 'id' | 'experienceLevel'>;
     onCharacterCreated(characterData);
   };
 
@@ -930,7 +811,7 @@ Presenta tus sugerencias claramente y en español.`;
 
         // Spellcasting info for summary
         let spellSummary: string[] = [];
-        const tempCharForSpells = initializeSpellcastingForCharacter({}, selectedPrimaryClass!, wantsMulticlass ? selectedSecondaryClass : null, levelForAdvSummary, finalAdvAbilitiesForSummary);
+        const tempCharForSpells = manageCharacterSpellcasting({}, selectedPrimaryClass!, wantsMulticlass ? selectedSecondaryClass : null, levelForAdvSummary, finalAdvAbilitiesForSummary);
         
         if (tempCharForSpells.knownSpells && tempCharForSpells.knownSpells.length > 0) {
             spellSummary.push(`Conjuros Conocidos: ${tempCharForSpells.knownSpells.map(s => `${s.name} (N${s.level})`).join(', ')}`);

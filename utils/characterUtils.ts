@@ -162,15 +162,34 @@ export const getAttackRollDetails = (
     abilityMod = calculateAbilityModifier(player.abilities[usedAbilityKey]);
     attackBonusValue += abilityMod;
     
-    // Check proficiency: either with the specific weapon name or its general category
-    const isProficient = player.weaponProficiencies.some(prof => 
-        prof.toLowerCase() === actualWeaponData.name.toLowerCase() || // Specific weapon proficiency
-        (prof === "Armas Sencillas" && actualWeaponData.properties?.includes('sencilla')) || // Generic "Simple Weapons"
-        (prof === "Armas Marciales" && actualWeaponData.properties?.includes('marcial')) || // Generic "Martial Weapons"
-        // Fallback for items not explicitly tagged 'sencilla'/'marcial' but are generally considered such
-        (prof === "Armas Sencillas" && ["Daga", "Maza", "Hoz", "Lanza", "Bastón", "Hacha de Mano", "Jabalina"].includes(actualWeaponData.name)) ||
-        (prof === "Armas Marciales" && ["Espada Larga", "Hacha de Batalla", "Estoque", "Espada Corta", "Arco Largo", "Arco Corto", "Ballesta Ligera"].includes(actualWeaponData.name))
-    );
+    let isProficient = player.weaponProficiencies.some(prof => prof.toLowerCase() === actualWeaponData.name.toLowerCase());
+
+    if (!isProficient && actualWeaponData.category) { // Prioritize category if specific name match failed
+        if (actualWeaponData.category === 'sencilla' && player.weaponProficiencies.includes("Armas Sencillas")) {
+            isProficient = true;
+        } else if (actualWeaponData.category === 'marcial' && player.weaponProficiencies.includes("Armas Marciales")) {
+            isProficient = true;
+        }
+    }
+    
+    if (!isProficient && actualWeaponData.properties) { // Fallback to properties if category check failed or category not present
+        if (player.weaponProficiencies.includes("Armas Sencillas") && actualWeaponData.properties.includes('sencilla')) {
+            isProficient = true;
+        } else if (player.weaponProficiencies.includes("Armas Marciales") && actualWeaponData.properties.includes('marcial')) {
+            isProficient = true;
+        }
+    }
+
+    // Legacy fallback: by item name array - should be phased out by updating ITEMS_DATA with categories/properties
+    if (!isProficient) {
+        if (player.weaponProficiencies.includes("Armas Sencillas") && 
+            ["Daga", "Maza", "Hoz", "Lanza", "Bastón", "Hacha de Mano", "Jabalina"].includes(actualWeaponData.name)) {
+            isProficient = true;
+        } else if (player.weaponProficiencies.includes("Armas Marciales") && 
+            ["Espada Larga", "Hacha de Batalla", "Estoque", "Espada Corta", "Arco Largo", "Arco Corto", "Ballesta Ligera"].includes(actualWeaponData.name)) {
+            isProficient = true;
+        }
+    }
 
     if (isProficient) {
       attackBonusValue += profBonus;
@@ -295,11 +314,13 @@ export const getSkillCheckResult = (
 
   const d20RollResultToUse = preRolledD20 || rollD20({ advantage, disadvantage });
   const finalRollValue = d20RollResultToUse.finalRoll + totalBonus;
-  const isSuccess = d20RollResultToUse.isCriticalSuccess ? true : d20RollResultToUse.isCriticalFailure ? false : finalRollValue >= targetDC;
+  // Corrected: Success is determined purely by comparing the total roll to the DC for skill checks.
+  const isSuccess = finalRollValue >= targetDC; 
 
   const details = 
-    `Prueba de ${skillName} (${abilityKey.toUpperCase()}): D20(${d20RollResultToUse.finalRoll}) ${d20RollResultToUse.withAdvantage ? '(V)' : ''}${d20RollResultToUse.withDisadvantage ? '(D)' : ''} +Mod(${abilityMod}) +Comp(${proficiencyBonusUsed}) = Total ${finalRollValue} vs CD ${targetDC}. ${isSuccess ? '¡Éxito!' : '¡Fallo!'}${d20RollResultToUse.isCriticalSuccess ? ' (CRIT)' : ''}${d20RollResultToUse.isCriticalFailure ? ' (PIFIA)' : ''}`;
-
+    `Prueba de ${skillName} (${abilityKey.toUpperCase()}): D20(${d20RollResultToUse.finalRoll}) ${d20RollResultToUse.withAdvantage ? '(V)' : ''}${d20RollResultToUse.withDisadvantage ? '(D)' : ''} +Mod(${abilityMod}) +Comp(${proficiencyBonusUsed}) = Total ${finalRollValue} vs CD ${targetDC}. ${isSuccess ? '¡Éxito!' : '¡Fallo!'}${d20RollResultToUse.isCriticalSuccess ? ' (Nat 20)' : ''}${d20RollResultToUse.isCriticalFailure ? ' (Nat 1)' : ''}`;
+    // Note: Nat 20 on a skill check isn't an auto-success in 5e RAW if total doesn't meet DC.
+    // Similarly for Nat 1. The text annotation for Nat 20/1 is kept for flavor.
   return {
     skillName, abilityKey, abilityMod, proficiencyBonusUsed, totalBonus, d20RollResult: d20RollResultToUse,
     finalRollValue, targetDC, isSuccess, 
@@ -326,15 +347,18 @@ export const getSavingThrowResult = (
   }
   const d20RollResultToUse = preRolledD20 || rollD20({ advantage, disadvantage });
   const finalRollValue = d20RollResultToUse.finalRoll + totalBonus;
-  const isSuccess = d20RollResultToUse.isCriticalSuccess ? true : d20RollResultToUse.isCriticalFailure ? false : finalRollValue >= targetDC;
+  // Corrected: Success is determined purely by comparing the total roll to the DC for saving throws.
+  const isSuccess = finalRollValue >= targetDC; 
 
   const details = 
-    `Salvación de ${savingThrowAbility.toUpperCase()}: D20(${d20RollResultToUse.finalRoll}) ${d20RollResultToUse.withAdvantage ? '(V)' : ''}${d20RollResultToUse.withDisadvantage ? '(D)' : ''} +Mod(${abilityMod}) +Comp(${proficiencyBonusUsed}) = Total ${finalRollValue} vs CD ${targetDC}. ${isSuccess ? '¡Éxito!' : '¡Fallo!'}${d20RollResultToUse.isCriticalSuccess ? ' (ÉXITO CRIT)' : ''}${d20RollResultToUse.isCriticalFailure ? ' (FALLO CRIT)' : ''}`;
+    `Salvación de ${savingThrowAbility.toUpperCase()}: D20(${d20RollResultToUse.finalRoll}) ${d20RollResultToUse.withAdvantage ? '(V)' : ''}${d20RollResultToUse.withDisadvantage ? '(D)' : ''} +Mod(${abilityMod}) +Comp(${proficiencyBonusUsed}) = Total ${finalRollValue} vs CD ${targetDC}. ${isSuccess ? '¡Éxito!' : '¡Fallo!'}${d20RollResultToUse.isCriticalSuccess ? ' (Nat 20)' : ''}${d20RollResultToUse.isCriticalFailure ? ' (Nat 1)' : ''}`;
+    // Note: Nat 20 on a saving throw isn't an auto-success in 5e RAW if total doesn't meet DC.
+    // Similarly for Nat 1. The text annotation for Nat 20/1 is kept for flavor.
   return {
     savingThrowAbility, abilityMod, proficiencyBonusUsed, totalBonus, d20RollResult: d20RollResultToUse,
     finalRollValue, targetDC, isSuccess,
-    isCriticalSuccess: d20RollResultToUse.isCriticalSuccess,
-    isCriticalFailure: d20RollResultToUse.isCriticalFailure,
+    isCriticalSuccess: d20RollResultToUse.isCriticalSuccess, 
+    isCriticalFailure: d20RollResultToUse.isCriticalFailure, 
     details,
   };
 };

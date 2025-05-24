@@ -161,8 +161,8 @@ export interface SkillProficiencyChoice {
 
 export interface SpellcastingDefinition {
   spellAbility: AbilityKey;
-  slotProgressionTable: number[][]; 
-  // FIX: Allow knownCantrips and knownSpells to be a number or a function returning a number.
+  slotProgressionTable: number[][]; // This might become less relevant for slots if strictly using multiclass table
+  casterType?: 'full' | 'half' | 'third'; // Recommended for more accurate caster level calculation
   knownCantrips?: number | ((classLevel: number) => number); 
   knownSpells?: number | ((classLevel: number, abilityMod: number) => number); 
   spellList?: string[]; 

@@ -163,6 +163,7 @@ const PALADIN_SPELLCASTING: SpellcastingDefinition = {
     const spell = SPELLS_DATA[key];
     return spell.level === 1 && (spell.school === "Evocación" || spell.school === "Abjuración" || spell.school === "Adivinación" || spell.school === "Encantamiento" || spell.name.includes("Golpe") || spell.name === "Bendición" || spell.name === "Mandato" || spell.name === "Escudo de Fe" || spell.name === "Favor Divino" || spell.name === "Detectar Magia" || spell.name === "Curar Heridas");
   }),
+  casterType: 'half', // Paladins are half-casters for multiclassing purposes
 };
 
 const WARLOCK_PACT_MAGIC: PactMagicDefinition = {
@@ -191,8 +192,6 @@ const WARLOCK_PACT_MAGIC: PactMagicDefinition = {
       if (charLevel >= 4) return 5;
       if (charLevel >= 3) return 4;
       if (charLevel >= 2) return 3;
-      // FIX: Corrected if statement. Was `if (charLevel >=1 ? 2 : 0);` which is an empty statement.
-      // Changed to `if (charLevel >= 1) return 2;` to fit the pattern.
       if (charLevel >= 1) return 2;
       return 0;
   }, 
