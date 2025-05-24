@@ -1,6 +1,6 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { Screen, APP_TITLE, ALL_CLASSES_ADVANCED as CLASSES_DATA, ALL_RACES_ADVANCED as RACES_DATA, ALL_BACKGROUNDS_ADVANCED as BACKGROUNDS_DATA, SPELLS_DATA, ITEMS_DATA, XP_THRESHOLDS_PER_LEVEL } from './constants'; // Renombrar para evitar conflicto
+import { Screen, APP_TITLE, ALL_CLASSES_ADVANCED as CLASSES_DATA, ALL_RACES_ADVANCED as RACES_DATA, ALL_BACKGROUNDS_ADVANCED as BACKGROUNDS_DATA, SPELLS_DATA, ITEMS_DATA, XP_THRESHOLDS_PER_LEVEL } from './constants';
 import type { Character, ExperienceLevel, AbilityScores, ChampionAbilities, Spell, SpellSlots, PactMagicSlots, BaseClassDetail, BaseBackgroundDetail } from './types';
 import WelcomeScreen from './components/WelcomeScreen';
 import ExperienceLevelScreen from './components/ExperienceLevelScreen';
@@ -8,152 +8,8 @@ import CharacterCreationScreen from './components/CharacterCreationScreen';
 import LoadGameScreen from './components/LoadGameScreen';
 import GameScreen from './components/GameScreen';
 import { saveCharacter as saveCharacterToStorage, loadCharacter as loadCharacterFromStorage, clearCharacter as clearCharacterFromStorage } from './services/localStorageService';
-import { calculateAbilityModifier, getCombinedProficiencies, calculateAc, getProficiencyBonus } from './utils/characterUtils';
-
-export const initializeSpellcastingForCharacterUpdate = ( 
-    loadedChar: Character, // Use a more generic name as it's used for new chars too
-    primaryClassDetails: BaseClassDetail | undefined,
-    secondaryClassDetails: BaseClassDetail | undefined
-  ): Pick<Character, 'knownSpells' | 'spellSlots' | 'pactMagicSlots'> => {
-    let charToUpdate = { ...loadedChar }; // Work on a copy
-    let knownSpellsList: Spell[] = charToUpdate.knownSpells ? [...charToUpdate.knownSpells] : [];
-    let spellSlotsToUpdate: SpellSlots | undefined = charToUpdate.spellSlots ? JSON.parse(JSON.stringify(charToUpdate.spellSlots)) : undefined;
-    let pactMagicSlotsToUpdate: PactMagicSlots | undefined = charToUpdate.pactMagicSlots ? JSON.parse(JSON.stringify(charToUpdate.pactMagicSlots)) : undefined;
-
-    const totalLevel = charToUpdate.level;
-    let primaryClassLevel = totalLevel;
-    let secondaryClassLevel = 0;
-
-    if (secondaryClassDetails && primaryClassDetails && charToUpdate.multiclassOption === secondaryClassDetails.name) {
-      // This logic assumes leveling up one class at a time in a multiclass scenario.
-      // For simplicity, let's assume level distribution is roughly even or based on a fixed split for initial creation.
-      // A more robust system would track individual class levels.
-      // For now, if totalLevel is 2 and multiclass, assume 1 level in each. If > 2, it's more complex.
-      // We'll simplify: if multiclass option exists, primary gets char.level-1 (min 1), secondary gets 1.
-      // This is a simplification. Real D&D multiclassing requires tracking levels per class.
-      if (totalLevel > 1) {
-        primaryClassLevel = totalLevel -1;
-        secondaryClassLevel = 1; 
-      } else { // totalLevel is 1, cannot be multiclass effectively yet.
-        primaryClassLevel = 1;
-        secondaryClassLevel = 0;
-      }
-    }
-
-
-    if (primaryClassDetails?.spellcasting) {
-      const scDef = primaryClassDetails.spellcasting;
-      if (!spellSlotsToUpdate) spellSlotsToUpdate = {};
-
-      const progressionIndex = primaryClassLevel > 0 ? primaryClassLevel -1 : 0;
-
-      if(scDef.slotProgressionTable && progressionIndex < scDef.slotProgressionTable.length && scDef.slotProgressionTable[progressionIndex]) {
-        scDef.slotProgressionTable[progressionIndex].forEach((numSlots, slotLvlIndex) => {
-          if (numSlots > 0) {
-            const key = `level${slotLvlIndex + 1}` as keyof SpellSlots;
-            spellSlotsToUpdate![key] = { max: numSlots, current: numSlots };
-          }
-        });
-      }
-      // Simplified spell learning
-      if (scDef.spellList && scDef.knownSpells) {
-        const numKnown = typeof scDef.knownSpells === 'function' ? scDef.knownSpells(primaryClassLevel, calculateAbilityModifier(charToUpdate.abilities[scDef.spellAbility])) : scDef.knownSpells;
-        scDef.spellList.slice(0, numKnown).forEach(spellName => {
-          if (SPELLS_DATA[spellName] && !knownSpellsList.find(s => s.name === spellName)) {
-            knownSpellsList.push(SPELLS_DATA[spellName]);
-          }
-        });
-      }
-      if (scDef.spellList && scDef.knownCantrips) {
-         const numKnownCantrips = typeof scDef.knownCantrips === 'function' ? scDef.knownCantrips(primaryClassLevel) : scDef.knownCantrips;
-         scDef.spellList.filter(sn => SPELLS_DATA[sn]?.level === 0).slice(0, numKnownCantrips).forEach(spellName => {
-           if (SPELLS_DATA[spellName] && !knownSpellsList.find(s => s.name === spellName)) knownSpellsList.push(SPELLS_DATA[spellName]);
-         });
-      }
-    } else if (primaryClassDetails?.pactMagic) {
-      const pmDef = primaryClassDetails.pactMagic;
-      pactMagicSlotsToUpdate = {
-        level: pmDef.slotLevelAtLevel(primaryClassLevel),
-        max: pmDef.slotsAtLevel(primaryClassLevel),
-        current: pmDef.slotsAtLevel(primaryClassLevel),
-      };
-       if (pmDef.spellList) {
-         const cantripsToLearn = pmDef.knownCantripsAtLevel(primaryClassLevel);
-         pmDef.spellList.filter(sn => SPELLS_DATA[sn]?.level === 0).slice(0, cantripsToLearn).forEach(spellName => {
-           if (SPELLS_DATA[spellName] && !knownSpellsList.find(s => s.name === spellName)) knownSpellsList.push(SPELLS_DATA[spellName]);
-         });
-         const spellsToLearn = pmDef.knownSpellsAtLevel(primaryClassLevel);
-         pmDef.spellList.filter(sn => SPELLS_DATA[sn]?.level > 0).slice(0, spellsToLearn).forEach(spellName => {
-            if (SPELLS_DATA[spellName] && !knownSpellsList.find(s => s.name === spellName)) knownSpellsList.push(SPELLS_DATA[spellName]);
-         });
-       }
-    }
-
-    // Secondary Class Spellcasting (Additive for spell slots, careful with pact magic)
-    if (secondaryClassDetails && secondaryClassLevel > 0) {
-       if (secondaryClassDetails.spellcasting) {
-            const scDef = secondaryClassDetails.spellcasting;
-            if (!spellSlotsToUpdate) spellSlotsToUpdate = {};
-            const progressionIndexSec = secondaryClassLevel > 0 ? secondaryClassLevel - 1 : 0; 
-            
-            if(scDef.slotProgressionTable && progressionIndexSec < scDef.slotProgressionTable.length && scDef.slotProgressionTable[progressionIndexSec]) {
-                scDef.slotProgressionTable[progressionIndexSec].forEach((numSlots, slotLvlIndex) => {
-                if (numSlots > 0) {
-                    const key = `level${slotLvlIndex + 1}` as keyof SpellSlots;
-                    if (!spellSlotsToUpdate![key]) spellSlotsToUpdate![key] = { max: 0, current: 0};
-                    // D&D 5e multiclass spell slots are more complex, this is a simplified sum.
-                    // For casters like Paladin/Ranger, their effective caster level is halved.
-                    // True calculation: sum effective caster levels, then look up on a combined table.
-                    // This simplified sum is okay for very low levels (1+1).
-                    spellSlotsToUpdate![key]!.max += numSlots; 
-                    spellSlotsToUpdate![key]!.current += numSlots; 
-                }
-                });
-            }
-            if (scDef.spellList && scDef.knownSpells) {
-                const numKnown = typeof scDef.knownSpells === 'function' ? scDef.knownSpells(secondaryClassLevel, calculateAbilityModifier(charToUpdate.abilities[scDef.spellAbility])) : scDef.knownSpells;
-                 scDef.spellList.slice(0, numKnown).forEach(spellName => {
-                    if (SPELLS_DATA[spellName] && !knownSpellsList.find(s => s.name === spellName)) {
-                        knownSpellsList.push(SPELLS_DATA[spellName]);
-                    }
-                });
-            }
-             if (scDef.spellList && scDef.knownCantrips) {
-                 const numKnownCantrips = typeof scDef.knownCantrips === 'function' ? scDef.knownCantrips(secondaryClassLevel) : scDef.knownCantrips;
-                 scDef.spellList.filter(sn => SPELLS_DATA[sn]?.level === 0).slice(0, numKnownCantrips).forEach(spellName => {
-                   if (SPELLS_DATA[spellName] && !knownSpellsList.find(s => s.name === spellName)) knownSpellsList.push(SPELLS_DATA[spellName]);
-                 });
-            }
-        } else if (secondaryClassDetails.pactMagic) {
-            // Generally, you don't combine Pact Magic slots with other spell slots in the same way.
-            // If primary was not Pact Magic, then secondary Pact Magic is separate.
-            if (!primaryClassDetails?.pactMagic) { 
-                const pmDef = secondaryClassDetails.pactMagic;
-                pactMagicSlotsToUpdate = { 
-                    level: pmDef.slotLevelAtLevel(secondaryClassLevel),
-                    max: pmDef.slotsAtLevel(secondaryClassLevel),
-                    current: pmDef.slotsAtLevel(secondaryClassLevel),
-                };
-                 if (pmDef.spellList) {
-                     const cantripsToLearn = pmDef.knownCantripsAtLevel(secondaryClassLevel);
-                     pmDef.spellList.filter(sn => SPELLS_DATA[sn]?.level === 0).slice(0, cantripsToLearn).forEach(spellName => {
-                       if (SPELLS_DATA[spellName] && !knownSpellsList.find(s => s.name === spellName)) knownSpellsList.push(SPELLS_DATA[spellName]);
-                     });
-                     const spellsToLearn = pmDef.knownSpellsAtLevel(secondaryClassLevel);
-                     pmDef.spellList.filter(sn => SPELLS_DATA[sn]?.level > 0).slice(0, spellsToLearn).forEach(spellName => {
-                       if (SPELLS_DATA[spellName] && !knownSpellsList.find(s => s.name === spellName)) knownSpellsList.push(SPELLS_DATA[spellName]);
-                     });
-                }
-            } // If both are Pact Magic, it doesn't stack levels/slots directly either, this would need more specific D&D rule implementation.
-        }
-    }
-    
-    return {
-        knownSpells: knownSpellsList.sort((a,b) => a.level - b.level || a.name.localeCompare(b.name)),
-        spellSlots: spellSlotsToUpdate,
-        pactMagicSlots: pactMagicSlotsToUpdate,
-    };
-}
+import { calculateAbilityModifier, getCombinedProficiencies, calculateAc } from './utils/characterUtils';
+import { manageCharacterSpellcasting } from './utils/spellcastingUtils';
 
 
 const App: React.FC = () => {
@@ -183,10 +39,9 @@ const App: React.FC = () => {
         const secondaryClassDetail = loadedChar.multiclassOption ? CLASSES_DATA.find(c => c.name === loadedChar.multiclassOption) : null; 
         const backgroundDetail = BACKGROUNDS_DATA.find(b => b.name === loadedChar.background) || null;
         const profs = getCombinedProficiencies(raceDetail, primaryClassDetail, secondaryClassDetail, backgroundDetail);
-        // AC calculation needs equipment. Default to empty array if not present for migration.
         const ac = calculateAc(loadedChar.abilities, profs.armors, loadedChar.equipment || []);
         loadedChar = { ...loadedChar, armorClass: loadedChar.armorClass ?? ac, weaponProficiencies: loadedChar.weaponProficiencies ?? profs.weapons, armorProficiencies: loadedChar.armorProficiencies ?? profs.armors, savingThrowProficiencies: loadedChar.savingThrowProficiencies ?? profs.savingThrows, skills: loadedChar.skills ?? profs.skills };
-        if(!loadedChar.equipment) loadedChar.equipment = []; // Ensure equipment array exists
+        if(!loadedChar.equipment) loadedChar.equipment = [];
         charNeedsUpdate = true;
       }
       
@@ -207,13 +62,12 @@ const App: React.FC = () => {
       if (primaryClassDetails?.spellcasting && !loadedChar.spellSlots) needsSpellcastingInit = true;
       if (primaryClassDetails?.pactMagic && !loadedChar.pactMagicSlots) needsSpellcastingInit = true;
       if (!loadedChar.knownSpells) needsSpellcastingInit = true;
-      // Check if spellcasting for secondary class is missing
       if (secondaryClassDetails?.spellcasting && !loadedChar.spellSlots && !primaryClassDetails?.spellcasting) needsSpellcastingInit = true;
       if (secondaryClassDetails?.pactMagic && !loadedChar.pactMagicSlots && !primaryClassDetails?.pactMagic) needsSpellcastingInit = true;
 
 
-      if (needsSpellcastingInit) {
-        const spellcastingUpdates = initializeSpellcastingForCharacterUpdate(loadedChar, primaryClassDetails, secondaryClassDetails);
+      if (needsSpellcastingInit && primaryClassDetails) { // Ensure primaryClassDetails exists
+        const spellcastingUpdates = manageCharacterSpellcasting(loadedChar, primaryClassDetails, secondaryClassDetails, loadedChar.level);
         loadedChar = { ...loadedChar, ...spellcastingUpdates };
         charNeedsUpdate = true;
       }
@@ -231,19 +85,50 @@ const App: React.FC = () => {
       if (!prevCharacter) return null;
       let newCharacterState = { ...prevCharacter, ...updatedStats };
       
-      // If level changed, re-initialize spellcasting based on the new level and existing classes
+      const primaryClassDetails = CLASSES_DATA.find(c => c.name === newCharacterState.primaryClass);
+      const secondaryClassDetails = newCharacterState.multiclassOption ? CLASSES_DATA.find(c => c.name === newCharacterState.multiclassOption) : undefined;
+
+      let reinitializeSpells = false;
+      // Check if level changed
       if (updatedStats.level && updatedStats.level !== prevCharacter.level) {
-        const primaryClassDetails = CLASSES_DATA.find(c => c.name === newCharacterState.primaryClass);
-        const secondaryClassDetails = newCharacterState.multiclassOption ? CLASSES_DATA.find(c => c.name === newCharacterState.multiclassOption) : undefined;
-        const spellUpdates = initializeSpellcastingForCharacterUpdate(newCharacterState, primaryClassDetails, secondaryClassDetails);
-        newCharacterState = {...newCharacterState, ...spellUpdates};
+          reinitializeSpells = true;
+      }
+      // Check if relevant ability scores changed (those affecting spellcasting ability or spells known for a class)
+      if (updatedStats.abilities && primaryClassDetails?.spellcasting?.spellAbility) {
+          const spellAbility = primaryClassDetails.spellcasting.spellAbility;
+          if (updatedStats.abilities[spellAbility] !== undefined && updatedStats.abilities[spellAbility] !== prevCharacter.abilities[spellAbility]) {
+              reinitializeSpells = true;
+          }
+      }
+      // Add similar check for secondary class if it's a caster and its spellcasting ability changed
+      if (updatedStats.abilities && secondaryClassDetails?.spellcasting?.spellAbility && newCharacterState.multiclassOption) {
+          const spellAbilitySec = secondaryClassDetails.spellcasting.spellAbility;
+          if (updatedStats.abilities[spellAbilitySec] !== undefined && updatedStats.abilities[spellAbilitySec] !== prevCharacter.abilities[spellAbilitySec]) {
+              reinitializeSpells = true;
+          }
+      }
+       if (updatedStats.abilities && primaryClassDetails?.pactMagic?.spellAbility) { // Warlock primary
+          const spellAbility = primaryClassDetails.pactMagic.spellAbility;
+          if (updatedStats.abilities[spellAbility] !== undefined && updatedStats.abilities[spellAbility] !== prevCharacter.abilities[spellAbility]) {
+              reinitializeSpells = true;
+          }
+      }
+      if (updatedStats.abilities && secondaryClassDetails?.pactMagic?.spellAbility && newCharacterState.multiclassOption) { // Warlock secondary
+          const spellAbilitySec = secondaryClassDetails.pactMagic.spellAbility;
+          if (updatedStats.abilities[spellAbilitySec] !== undefined && updatedStats.abilities[spellAbilitySec] !== prevCharacter.abilities[spellAbilitySec]) {
+              reinitializeSpells = true;
+          }
+      }
+
+
+      if (reinitializeSpells && primaryClassDetails) {
+          const spellUpdates = manageCharacterSpellcasting(newCharacterState, primaryClassDetails, secondaryClassDetails, newCharacterState.level);
+          newCharacterState = {...newCharacterState, ...spellUpdates};
       }
       
-      // Always recalculate AC if abilities or equipment could have changed
-       if (updatedStats.abilities || updatedStats.equipment || updatedStats.armorProficiencies) {
+      if (updatedStats.abilities || updatedStats.equipment || updatedStats.armorProficiencies) {
          newCharacterState.armorClass = calculateAc(newCharacterState.abilities, newCharacterState.armorProficiencies, newCharacterState.equipment);
        }
-
 
       saveCharacterToStorage(newCharacterState);
       return newCharacterState;
@@ -262,13 +147,32 @@ const App: React.FC = () => {
 
   const handleCharacterCreated = useCallback((newCharacterData: Omit<Character, 'id' | 'experienceLevel'>) => {
     if (!selectedExperienceLevel) { console.error("Nivel de experiencia no seleccionado."); navigateTo(Screen.ExperienceLevel); return; }
-    const newCharacter: Character = { ...newCharacterData, id: Date.now().toString(), experienceLevel: selectedExperienceLevel, feats: newCharacterData.feats || [] };
-    setCharacter(newCharacter); saveCharacterToStorage(newCharacter); navigateTo(Screen.Game);
+    
+    const primaryClassDetails = CLASSES_DATA.find(c => c.name === newCharacterData.primaryClass);
+    const secondaryClassDetails = newCharacterData.multiclassOption ? CLASSES_DATA.find(c => c.name === newCharacterData.multiclassOption) : undefined;
+    
+    let characterWithSpells = { ...newCharacterData };
+    if (primaryClassDetails) {
+        const spellUpdates = manageCharacterSpellcasting(characterWithSpells, primaryClassDetails, secondaryClassDetails, newCharacterData.level);
+        characterWithSpells = { ...characterWithSpells, ...spellUpdates };
+    }
+
+    const newCharacter: Character = {
+        ...characterWithSpells,
+        id: Date.now().toString(),
+        experienceLevel: selectedExperienceLevel,
+        feats: newCharacterData.feats || []
+    } as Character; // Cast because characterWithSpells is partial until spells are added
+
+    setCharacter(newCharacter);
+    saveCharacterToStorage(newCharacter);
+    navigateTo(Screen.Game);
   }, [navigateTo, selectedExperienceLevel]);
 
   const handleCharacterLoaded = useCallback((loadedChar: Character) => {
     let charToLoad = {...loadedChar};
     let charNeedsUpdateOnLoad = false;
+
      if (charToLoad.armorClass === undefined || !charToLoad.weaponProficiencies) {
         const raceDetail = RACES_DATA.find(r => r.name === charToLoad.race) || null;
         const primaryClassDetail = CLASSES_DATA.find(c => c.name === charToLoad.primaryClass) || null;
@@ -290,8 +194,8 @@ const App: React.FC = () => {
       if (secondaryClassDetailsLoad?.spellcasting && !charToLoad.spellSlots && !primaryClassDetailsLoad?.spellcasting) needsSpellcastingMigrationOnLoad = true;
       if (secondaryClassDetailsLoad?.pactMagic && !charToLoad.pactMagicSlots && !primaryClassDetailsLoad?.pactMagic) needsSpellcastingMigrationOnLoad = true;
 
-    if (needsSpellcastingMigrationOnLoad) {
-        const spellUpdates = initializeSpellcastingForCharacterUpdate(charToLoad, primaryClassDetailsLoad, secondaryClassDetailsLoad);
+    if (needsSpellcastingMigrationOnLoad && primaryClassDetailsLoad) { // Ensure primaryClassDetailsLoad exists
+        const spellUpdates = manageCharacterSpellcasting(charToLoad, primaryClassDetailsLoad, secondaryClassDetailsLoad, charToLoad.level);
         charToLoad = { ...charToLoad, ...spellUpdates };
         charNeedsUpdateOnLoad = true;
     }

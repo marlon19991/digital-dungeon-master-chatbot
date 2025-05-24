@@ -5,11 +5,10 @@ import type { Character, Enemy, CombatParticipant, AttackRollResult, AbilityKey,
 import Button from './shared/Button';
 import { geminiService } from '../services/geminiService';
 import { PaperAirplaneIcon, SparklesIcon, ArrowPathIcon, ArrowUturnLeftIcon, UserCircleIcon, Cog6ToothIcon, HeartIcon, CubeIcon, PlusCircleIcon, MinusCircleIcon, ShieldExclamationIcon, HandRaisedIcon, WandSparklesIcon, ArrowsUpDownLeftRightIcon, PuzzlePieceIcon, MagnifyingGlassIcon, ClockIcon, ArrowRightIcon, BoltIcon, ShieldCheckIcon, BookOpenIcon, BrainIcon, WindIcon, EyeIcon, LockOpenIcon, ArrowsPointingOutIcon, ChatBubbleLeftRightIcon, ShieldPlusIcon, BackpackIcon, CircleDollarSignIcon, GlassDrinkIcon, ArrowUpOnSquareIcon, ArrowUpCircleIcon, ChevronDownIcon, ChevronUpIcon, StarIcon } from './shared/Icons';
-// FIX: Corrected function name from rollMultipleDice to rollDice
 import { rollD20 as rollD20ForDiceUtil, rollDie, rollDice } from '../utils/diceUtils';
 import { SPELLS_DATA, ABILITIES, SKILL_TO_ABILITY_MAP, ITEMS_DATA, SHOPKEEPERS_DATA, XP_THRESHOLDS_PER_LEVEL, getAverageHitDieValue as getAvgHitDie, ALL_CLASSES_ADVANCED, FEATS_DATA, ADVENTURE_START_NODE_ID, PREDEFINED_ENEMY_GROUPS } from '../constants';
 import { calculateAbilityModifier, getProficiencyBonus, getAttackRollDetails, getSkillCheckResult, getSavingThrowResult, calculateAc as calculateCharacterAc } from '../utils/characterUtils';
-import { initializeSpellcastingForCharacterUpdate } from '../App';
+import { manageCharacterSpellcasting } from '../utils/spellcastingUtils';
 import { adventureData } from '../adventureData';
 
 
@@ -101,19 +100,230 @@ const GameScreen: React.FC<GameScreenProps> = ({ character: initialCharacter, on
     });
   }, [propagateUpdate]);
 
-  const gameScreenApi: GameScreenApi = {
-    updateCharacterStats: localUpdateCharacterStats,
-    addSystemMessage: (message, data) => addMessage(message, 'system', data),
-    addPlayerMessage: (message) => addMessage(message, 'user'),
-    addDmMessage: (message) => addMessage(message, 'dm'),
-    initiateCombat: (enemyGroupIds, victoryNodeId, defeatNodeId, combatDescription) => {
-        handleInitiateCombat(enemyGroupIds, victoryNodeId, defeatNodeId, combatDescription);
-    },
-    openShop: (shopId) => handleOpenShop(shopId),
-    changeScene: (sceneId) => setCurrentSceneId(sceneId),
-    getCharacter: () => character,
-  };
+  // Forward declaration for addMessage due to circular dependencies in callbacks
+  const addMessageRef = useRef<typeof addMessage>(null);
+
+  const addXp = useCallback((amount: number) => {
+    if (amount <= 0) return;
+    // Use functional update for setCharacter to ensure access to the latest state
+    setCharacter(prevChar => {
+      const newXp = prevChar.xp + amount;
+      if (addMessageRef.current) {
+        addMessageRef.current(`¡Has ganado ${amount} XP! (Total: ${newXp})`, 'system');
+      }
+      const charWithNewXp = { ...prevChar, xp: newXp };
+      // Call checkAndHandleLevelUp with the character state that includes the new XP
+      // checkAndHandleLevelUp itself will handle further state updates if level up occurs
+      checkAndHandleLevelUp(newXp, charWithNewXp);
+      // Return the state with new XP, further updates from level up will be handled by checkAndHandleLevelUp/finalizeLevelUp
+      // propagateUpdate will be called by localUpdateCharacterStats or finalizeLevelUp
+      return charWithNewXp; 
+    });
+  }, [ /* Dependencies for checkAndHandleLevelUp will be complex, handled by its own useCallback if needed */ ]);
+
+
+  const addMessage = useCallback((text: string, sender: Message['sender'], data?: AttackRollResult | SkillCheckResult | SavingThrowResult) => {
+    let fullText = text;
+    if (data && 'details' in data && typeof data.details === 'string') {
+        fullText = data.details;
+    }
+    const newMessage: Message = {
+        id: `${sender}-${Date.now()}-${Math.random()}`, text: fullText.trim(), sender, timestamp: new Date(),
+    };
+    if (data) {
+        if ('totalAttackRoll' in data) newMessage.attackRollData = data as AttackRollResult;
+        else if ('skillName' in data) newMessage.skillCheckData = data as SkillCheckResult;
+        else if ('savingThrowAbility' in data) newMessage.savingThrowData = data as SavingThrowResult;
+    }
+    setMessages(prev => [...prev, newMessage]);
+
+    if (sender === 'dm') {
+        const { itemsFound, goldFound } = parseGeminiLoot(text);
+        // Use setCharacter with functional update to ensure we're working with the latest state
+        setCharacter(prevChar => {
+          let charToUpdate = { ...prevChar };
+          let changed = false;
+          if (itemsFound.length > 0 || goldFound > 0) {
+              charToUpdate.equipment = [...charToUpdate.equipment, ...itemsFound];
+              charToUpdate.gold = charToUpdate.gold + goldFound;
+              changed = true;
+
+              let lootMessageText = "Has encontrado: ";
+              if (itemsFound.length > 0) lootMessageText += itemsFound.map(id => ITEMS_DATA[id]?.name || id).join(', ') + ". ";
+              if (goldFound > 0) lootMessageText += `${goldFound} po.`;
+              // Recursively call addMessage via ref if available, ensuring it's the memoized version
+              if (addMessageRef.current) addMessageRef.current(lootMessageText, 'system');
+          }
+          const foundItem = parseFoundItem(text);
+          if (foundItem) {
+              charToUpdate.equipment = [...charToUpdate.equipment, foundItem];
+              changed = true;
+              if (addMessageRef.current) addMessageRef.current(`Has encontrado: ${ITEMS_DATA[foundItem]?.name || foundItem}.`, 'system');
+          }
+          
+          if (changed) {
+            // Call localUpdateCharacterStats (which calls propagateUpdate) only if actual changes occurred
+            // This relies on localUpdateCharacterStats correctly handling prev state or direct values
+            localUpdateCharacterStats({ equipment: charToUpdate.equipment, gold: charToUpdate.gold });
+          }
+          return charToUpdate; // Return the potentially modified character state
+        });
+
+        const xpAwardedByDm = parseGeminiXPAward(text);
+        if (xpAwardedByDm > 0) addXp(xpAwardedByDm);
+    }
+  }, [localUpdateCharacterStats, addXp]); // Removed character from deps, using functional updates for setCharacter
+
+  // Assign the memoized addMessage to the ref
+  useEffect(() => {
+    addMessageRef.current = addMessage;
+  }, [addMessage]);
+
+
+  const checkAndHandleLevelUp = useCallback((currentXp: number, charToCheck: Character) => {
+    const currentLevel = charToCheck.level;
+    if (currentLevel >= XP_THRESHOLDS_PER_LEVEL.length -1) return;
+    const xpNeededForNextLevel = XP_THRESHOLDS_PER_LEVEL[currentLevel + 1];
+
+    if (xpNeededForNextLevel !== undefined && charToCheck.xp >= xpNeededForNextLevel) {
+        const newLevel = currentLevel + 1;
+        if (addMessageRef.current) addMessageRef.current(`¡SUBIDA DE NIVEL! Has alcanzado el Nivel ${newLevel}.`, 'system');
+        
+        const primaryClassDetails = ALL_CLASSES_ADVANCED.find(c => c.name === charToCheck.primaryClass);
+        if (!primaryClassDetails) return;
+
+        const conMod = calculateAbilityModifier(charToCheck.abilities.con);
+        const hpIncrease = getAvgHitDie(primaryClassDetails.hitDie) + conMod;
+        const newMaxHp = charToCheck.maxHp + Math.max(1, hpIncrease);
+        
+        let updatedStatsForLevelUp: Partial<Character> = {
+            level: newLevel, maxHp: newMaxHp, currentHp: newMaxHp,
+            hitDice: { ...charToCheck.hitDice, total: newLevel, current: (charToCheck.hitDice.current + 1 > newLevel ? newLevel : charToCheck.hitDice.current + 1) }
+        };
+        
+        if (primaryClassDetails.asiLevels?.includes(newLevel)) {
+            setShowASIChoiceModal('choice'); 
+            setCharacter(prev => ({...prev, ...updatedStatsForLevelUp})); 
+            return; 
+        }
+        finalizeLevelUp(updatedStatsForLevelUp, charToCheck);
+    }
+  }, [ /* finalizeLevelUp will be a dep */ ]);
+
+
+  const finalizeLevelUp = useCallback((levelUpChanges: Partial<Character>, charBeforeASI: Character) => {
+    const charAfterInitialChanges = { ...charBeforeASI, ...levelUpChanges };
+    const primaryClassDetails = ALL_CLASSES_ADVANCED.find(c => c.name === charAfterInitialChanges.primaryClass);
+    const secondaryClassDetails = charAfterInitialChanges.multiclassOption ? ALL_CLASSES_ADVANCED.find(c => c.name === charAfterInitialChanges.multiclassOption) : undefined;
+    
+    const spellcastingUpdates = manageCharacterSpellcasting(charAfterInitialChanges, primaryClassDetails!, secondaryClassDetails, charAfterInitialChanges.level);
+    const finalUpdatedStats: Partial<Character> = { ...charAfterInitialChanges, ...spellcastingUpdates };
+    
+    if (finalUpdatedStats.abilities || finalUpdatedStats.equipment || finalUpdatedStats.armorProficiencies) {
+      finalUpdatedStats.armorClass = calculateCharacterAc(finalUpdatedStats.abilities!, finalUpdatedStats.armorProficiencies!, finalUpdatedStats.equipment!);
+    }
+
+    localUpdateCharacterStats(finalUpdatedStats);
+    if (addMessageRef.current) addMessageRef.current(`Nivel ${finalUpdatedStats.level} alcanzado. HP máx: ${finalUpdatedStats.maxHp}. Capacidades actualizadas.`, 'system');
+    
+    setCharacter(prevFinalChar => {
+        // Use a timeout to avoid immediate state update conflicts if checkAndHandleLevelUp causes further updates
+        setTimeout(() => checkAndHandleLevelUp(prevFinalChar.xp, prevFinalChar), 0);
+        return prevFinalChar;
+    });
+  }, [localUpdateCharacterStats, checkAndHandleLevelUp /* addMessageRef indirectly used */ ]);
   
+  // Now that finalizeLevelUp is defined, checkAndHandleLevelUp's useCallback can be finalized
+  // Re-declare checkAndHandleLevelUp with finalizeLevelUp in its dependency array if it wasn't implicitly captured.
+  // However, since finalizeLevelUp calls checkAndHandleLevelUp, this forms a cycle if not careful.
+  // The current structure with setTimeout in finalizeLevelUp for the recursive check might be okay.
+
+  const handleGeminiResponse = useCallback(async (promptForDM: string) => {
+    setIsDMThinking(true);
+    let dmResponseText = "(Respuesta de marcador de posición del DM para la acción del jugador.)";
+     if (typeof process.env.API_KEY === 'undefined' || process.env.API_KEY === '') {
+       await new Promise(resolve => setTimeout(resolve, 1000));
+        if (promptForDM.includes("Saquear y Buscar")) {
+            dmResponseText = "Registras el área. [LOOT_ITEM:Daga] [LOOT_GOLD:5]";
+        } else if (promptForDM.includes("éxito")) {
+            dmResponseText = "¡Lo logras! El camino se despeja.";
+        } else if (promptForDM.includes("fallo")) {
+            dmResponseText = "Fallaste. Nada parece cambiar, o quizás las cosas empeoran un poco.";
+        }
+    } else {
+        try {
+            dmResponseText = await geminiService.generateText(promptForDM);
+        } catch (error) {
+            console.warn("API call failed, using fallback.", error);
+            dmResponseText = `Las antiguas magias (API Gemini) fallan. Describe tu acción de nuevo o de otra forma. (Error: ${error instanceof Error ? error.message : String(error)})`;
+        }
+    }
+    if (addMessageRef.current) addMessageRef.current(dmResponseText, 'dm');
+    setIsDMThinking(false);
+  }, [/* addMessageRef indirectly used */]);
+
+  const handleOpenShop = useCallback((shopId: string) => {
+    const shopData = SHOPKEEPERS_DATA[shopId];
+    if (shopData) {
+      setCurrentShopkeeper(shopData);
+      setShowShopModal(true);
+    } else {
+      if (addMessageRef.current) addMessageRef.current("Tienda no disponible.", "system");
+    }
+  }, [/* setCurrentShopkeeper, setShowShopModal, addMessageRef */]);
+
+  const handleInitiateCombat = useCallback((enemyGroupIds: string[], victoryNode?: string, defeatNode?: string, combatDesc?: string) => {
+    setIsInCombat(true);
+    setCombatJustEnded(false);
+    setLastAttackResult(null);
+    setCombatVictoryNode(victoryNode);
+    setCombatDefeatNode(defeatNode);
+    // ... (rest of the logic from original handleInitiateCombat)
+    // Make sure to use addMessageRef.current where addMessage was used
+    const currentEnemiesSetup: Enemy[] = [];
+    enemyGroupIds.forEach(groupId => {
+        const groupTemplate = PREDEFINED_ENEMY_GROUPS[groupId];
+        if (groupTemplate) {
+            groupTemplate.enemies.forEach((eTemplate, index) => {
+                const enemyInstance = JSON.parse(JSON.stringify(eTemplate));
+                enemyInstance.currentHp = enemyInstance.maxHp;
+                enemyInstance.id = `${eTemplate.id}_${groupId}_${index}_${Math.random().toString(36).substring(2,7)}`;
+                currentEnemiesSetup.push(enemyInstance);
+            });
+        } else console.warn(`Grupo de enemigos no encontrado: ${groupId}`);
+    });
+    if (currentEnemiesSetup.length === 0) {
+        if(addMessageRef.current) addMessageRef.current("No hay enemigos para este encuentro.", "system");
+        if(victoryNode) setCurrentSceneId(victoryNode); else if(addMessageRef.current) addMessageRef.current("El combate concluye.", "system");
+        setIsInCombat(false); return;
+    }
+    setEnemies(currentEnemiesSetup);
+    const participants: CombatParticipant[] = [ { ...character, participantType: 'player' }, ...currentEnemiesSetup.map(e => ({ ...e, participantType: 'enemy' as 'enemy' }))];
+    participants.forEach(p => { const dexScore = p.participantType === 'player' ? (p as Character).abilities.dex : (p as Enemy).dexterity; p.initiativeRoll = rollD20ForDiceUtil().finalRoll + calculateAbilityModifier(dexScore); });
+    participants.sort((a, b) => (b.initiativeRoll || 0) - (a.initiativeRoll || 0));
+    setInitiativeOrder(participants); setCurrentTurnIndex(0); setCurrentTargetId(null); setPlayerTookActionThisTurn(false); setPlayerHasBonusAction(true); setPlayerUsedActionSurgeThisTurn(false);
+    const initOrderText = participants.map((p, i) => `${i + 1}. ${p.name} (Iniciativa ${p.initiativeRoll})`).join('\n');
+    if(addMessageRef.current) addMessageRef.current(`¡Combate iniciado! ${combatDesc || PREDEFINED_ENEMY_GROUPS[enemyGroupIds[0]]?.description || ""}\nOrden de Iniciativa:\n${initOrderText}`, 'system');
+    const firstParticipant = participants[0];
+    if (firstParticipant.participantType === 'player') { if(addMessageRef.current) addMessageRef.current(`${character.name}, ¡es tu turno!`, 'system'); }
+    else { if(addMessageRef.current) addMessageRef.current(`Turno de ${firstParticipant.name}.`, 'system'); setTimeout(() => handleEnemyTurn(firstParticipant as Enemy), 1000); }
+  }, [character /*, other state setters, handleEnemyTurn */]);
+
+
+  const gameScreenApi = useMemo((): GameScreenApi => ({
+    updateCharacterStats: localUpdateCharacterStats,
+    addSystemMessage: (message, data) => addMessageRef.current ? addMessageRef.current(message, 'system', data) : undefined,
+    addPlayerMessage: (message) => addMessageRef.current ? addMessageRef.current(message, 'user') : undefined,
+    addDmMessage: (message) => addMessageRef.current ? addMessageRef.current(message, 'dm') : undefined,
+    initiateCombat: handleInitiateCombat,
+    openShop: handleOpenShop,
+    changeScene: setCurrentSceneId, // Direct setter is stable
+    getCharacter: () => character, // This will return the character state at the time gameScreenApi was created/memoized
+  }), [localUpdateCharacterStats, handleInitiateCombat, handleOpenShop, setCurrentSceneId, character]);
+  // Note: `character` in getCharacter means gameScreenApi changes if character identity changes.
+  // This might be okay if onEnter/description logic expects it.
+  // Or, getCharacter could be `() => charRef.current` if we introduce a charRef.
+
   useEffect(() => {
     setCharacter(initialCharacter);
     const firstWeapon = initialCharacter.equipment.find(itemName => ITEMS_DATA[itemName]?.type === 'weapon');
@@ -124,27 +334,29 @@ const GameScreen: React.FC<GameScreenProps> = ({ character: initialCharacter, on
     const newScene = adventureData[currentSceneId];
     if (newScene) {
         setCurrentScene(newScene);
-        // Clear previous scene-specific modals
         setShowEnvironmentalSkillCheckModal(null);
         setShowSavingThrowModal(null);
-        setCombatJustEnded(false); // Reset combat ended flag when moving to a new scene
+        setCombatJustEnded(false);
 
         if (newScene.description) {
+            // Pass character directly, gameScreenApi is memoized
             const descText = typeof newScene.description === 'function' ? newScene.description(character, gameScreenApi) : newScene.description;
-            addMessage(descText, 'scene');
+            if (addMessageRef.current) addMessageRef.current(descText, 'scene');
         }
         if (newScene.onEnter) {
+            // Pass character directly
             Promise.resolve(newScene.onEnter(character, gameScreenApi)).catch(err => console.error("Error in onEnter:", err));
         }
     } else if (currentSceneId === "RESET_GAME_STATE") {
-        onExitGame();
+        onExitGame(); // onExitGame is a prop, assumed stable or memoized by parent
     } else {
         console.error(`Escena no encontrada: ${currentSceneId}`);
-        addMessage(`Error: La escena "${currentSceneId}" no existe. Volviendo a la introducción.`, 'system');
-        setCurrentSceneId(ADVENTURE_START_NODE_ID);
+        if (addMessageRef.current) addMessageRef.current(`Error: La escena "${currentSceneId}" no existe. Volviendo a la introducción.`, 'system');
+        setCurrentSceneId(ADVENTURE_START_NODE_ID); // setCurrentSceneId is stable
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentSceneId]); // Removed character.name as it could cause loop with onEnter updates. Scene changes should only depend on sceneId.
+  }, [currentSceneId, gameScreenApi, onExitGame, character /*character is kept here based on its usage in onEnter/description, loop risk is noted*/]);
+  // The original eslint-disable is removed. If character causes loops,
+  // then onEnter/description functions need to be refactored not to trigger updates that cause loops for the same scene.
 
   
   const currentParticipant = isInCombat ? initiativeOrder[currentTurnIndex] : null;
@@ -159,27 +371,60 @@ const GameScreen: React.FC<GameScreenProps> = ({ character: initialCharacter, on
   const parseGeminiLoot = (dmResponse: string): { itemsFound: string[], goldFound: number } => {
     const itemsFound: string[] = [];
     let goldFound = 0;
-    const itemRegex = /\[LOOT_ITEM:([^\]]+)\]/gi;
-    const goldRegex = /\[LOOT_GOLD:(\d+)\]/gi;
+    const itemRegex = /\[\s*LOOT_ITEM\s*:\s*([^\]]+?)\s*\]/gi;
+    const goldRegex = /\[\s*LOOT_GOLD\s*:\s*(\d+)\s*\]/gi;
     let match;
+
     while ((match = itemRegex.exec(dmResponse)) !== null) {
-      if (ITEMS_DATA[match[1]]) itemsFound.push(match[1]);
-      else console.warn(`Loot no reconocido: ${match[1]}`);
+      const itemName = match[1].trim();
+      if (ITEMS_DATA[itemName]) {
+        itemsFound.push(itemName);
+      } else {
+        console.warn(`Loot no reconocido (después de trim): ${itemName}`);
+      }
     }
-    while ((match = goldRegex.exec(dmResponse)) !== null) goldFound += parseInt(match[1], 10);
+
+    while ((match = goldRegex.exec(dmResponse)) !== null) {
+      const goldValue = match[1].trim();
+      const parsedGold = parseInt(goldValue, 10);
+      if (!isNaN(parsedGold)) {
+        goldFound += parsedGold;
+      } else {
+        console.warn(`Valor de oro inválido encontrado: ${goldValue}`);
+      }
+    }
     return { itemsFound, goldFound };
   };
 
   const parseFoundItem = (dmResponse: string): string | null => {
-    const itemRegex = /\[FOUND_ITEM:([^\]]+)\]/i;
+    const itemRegex = /\[\s*FOUND_ITEM\s*:\s*([^\]]+?)\s*\]/i;
     const match = dmResponse.match(itemRegex);
-    return (match && ITEMS_DATA[match[1]]) ? match[1] : null;
+    if (match && match[1]) {
+      const itemName = match[1].trim();
+      if (ITEMS_DATA[itemName]) {
+        return itemName;
+      } else {
+        console.warn(`Item encontrado no reconocido (después de trim): ${itemName}`);
+        return null;
+      }
+    }
+    return null;
   };
 
   const parseGeminiXPAward = (dmResponse: string): number => {
-    const xpRegex = /\[XP_AWARDED:(\d+)\]/i;
+    const xpRegex = /\[\s*XP_AWARDED\s*:\s*(\d+)\s*\]/i;
     const match = dmResponse.match(xpRegex);
-    return (match && match[1]) ? parseInt(match[1], 10) : 0;
+    if (match && match[1]) {
+      const xpValue = match[1].trim();
+      const parsedXP = parseInt(xpValue, 10);
+      if (!isNaN(parsedXP)) {
+        return parsedXP;
+      } else {
+        console.warn(`Valor de XP inválido encontrado: ${xpValue}`);
+        return 0;
+      }
+    }
+    return 0;
   };
 
   const addMessage = (text: string, sender: Message['sender'], data?: AttackRollResult | SkillCheckResult | SavingThrowResult) => {
@@ -870,7 +1115,143 @@ const handleSelectFeat = (featId: string) => {
   const isSpellcaster = character.spellSlots || character.pactMagicSlots;
   const xpForNextLevel = (character.level < XP_THRESHOLDS_PER_LEVEL.length -1) ? XP_THRESHOLDS_PER_LEVEL[character.level + 1] : Infinity;
   
-  const displayedSceneOptions = currentScene?.options.filter(opt => !opt.requires || opt.requires(character)) || [];
+  const displayedSceneOptions = useMemo(() => {
+    if (!currentScene || !character) return [];
+    return currentScene.options.filter(opt => !opt.requires || opt.requires(character));
+  }, [currentScene, character]);
+
+  const handleShortRest = useCallback((completionNodeId?: string) => {
+    setShowShortRestModal(true); 
+    // The actual logic is in confirmShortRest, triggered by modal button.
+    // completionNodeId might need to be stored or passed to confirmShortRest if it varies.
+  }, [setShowShortRestModal]);
+
+  const confirmShortRest = useCallback((completionNodeId?: string) => {
+    if (hitDiceToSpend <= 0 || hitDiceToSpend > character.hitDice.current) {
+        if(addMessageRef.current) addMessageRef.current("Cantidad de Dados de Golpe inválida.", 'system'); 
+        setShowShortRestModal(false); 
+        return;
+    }
+    let hpRestored = 0;
+    const conModifier = calculateAbilityModifier(character.abilities.con);
+    for (let i = 0; i < hitDiceToSpend; i++) hpRestored += Math.max(1, rollDie(character.hitDice.dieType) + conModifier);
+    
+    const newCurrentHp = Math.min(character.maxHp, character.currentHp + hpRestored);
+    const newCurrentHitDice = character.hitDice.current - hitDiceToSpend;
+    let updatedStats: Partial<Character> = {
+        currentHp: newCurrentHp, hitDice: { ...character.hitDice, current: newCurrentHitDice },
+    };
+    if(character.championAbilities) updatedStats.championAbilities = { ...character.championAbilities, secondWindUsed: false, actionSurgeUsed: false };
+    if (character.pactMagicSlots) updatedStats.pactMagicSlots = { ...character.pactMagicSlots, current: character.pactMagicSlots.max };
+
+    localUpdateCharacterStats(updatedStats);
+    if(addMessageRef.current) {
+      addMessageRef.current(`${character.name} descansa brevemente, gasta ${hitDiceToSpend} DG y recupera ${hpRestored} HP. (HP: ${newCurrentHp}/${character.maxHp})`, 'system');
+      if(character.primaryClass === 'Guerrero' || character.multiclassOption === 'Guerrero') addMessageRef.current("Aliento de Combate y Oleada de Acción recargados.", "system");
+      if(character.pactMagicSlots) addMessageRef.current("Espacios de Pacto restaurados.", "system");
+    }
+    setShowShortRestModal(false); setHitDiceToSpend(1);
+    if (completionNodeId) setCurrentSceneId(completionNodeId);
+  }, [character, hitDiceToSpend, localUpdateCharacterStats, setHitDiceToSpend, setShowShortRestModal, setCurrentSceneId]);
+  
+  const handleLongRest = useCallback((completionNodeId?: string) => {
+    const newCurrentHp = character.maxHp;
+    const hdRegained = Math.max(1, Math.floor(character.hitDice.total / 2));
+    let updatedStats: Partial<Character> = {
+        currentHp: newCurrentHp, 
+        hitDice: { ...character.hitDice, current: Math.min(character.hitDice.total, character.hitDice.current + hdRegained) },
+    };
+    if(character.championAbilities) updatedStats.championAbilities = { ...character.championAbilities, secondWindUsed: false, actionSurgeUsed: false };
+    if (character.spellSlots) {
+        const restoredSpells: SpellSlots = {};
+        for (const lvl in character.spellSlots) restoredSpells[lvl as keyof SpellSlots] = { ...character.spellSlots[lvl as keyof SpellSlots]!, current: character.spellSlots[lvl as keyof SpellSlots]!.max};
+        updatedStats.spellSlots = restoredSpells;
+    }
+    if (character.pactMagicSlots) updatedStats.pactMagicSlots = { ...character.pactMagicSlots, current: character.pactMagicSlots.max };
+
+    localUpdateCharacterStats(updatedStats);
+    if(addMessageRef.current) addMessageRef.current(`${character.name} realiza un descanso largo. HP y recursos restaurados. (HP: ${newCurrentHp}/${character.maxHp}, DG: ${updatedStats.hitDice?.current}/${character.hitDice.total})`, 'system');
+    if (completionNodeId) setCurrentSceneId(completionNodeId);
+  }, [character, localUpdateCharacterStats, setCurrentSceneId]);
+
+  const handleRest = useCallback((details: SceneRestDetails) => {
+    if (details.type === 'short') {
+        handleShortRest(details.completionNodeId);
+        if(details.durationMessage && addMessageRef.current) addMessageRef.current(details.durationMessage, 'system');
+    } else if (details.type === 'long') {
+        handleLongRest(details.completionNodeId);
+        if(details.durationMessage && addMessageRef.current) addMessageRef.current(details.durationMessage, 'system');
+    }
+  }, [handleShortRest, handleLongRest]);
+
+  const handleGenericPlayerActionViaInput = useCallback(() => {
+    if (userInput.trim() === '' || isDMThinking) return;
+    const currentActionText = userInput;
+    if (addMessageRef.current) addMessageRef.current(currentActionText, 'user');
+    setUserInput('');
+    
+    if(isPlayerTurn && isInCombat) setPlayerTookActionThisTurn(true);
+
+    const sceneDesc = typeof currentScene?.description === 'function' 
+        ? currentScene.description(character, gameScreenApi) 
+        : currentScene?.description;
+
+    const promptForDM = 
+        `Contexto de Escena: ${currentScene?.title || currentSceneId} - ${sceneDesc}. ` +
+        `El jugador, ${character.name} (Nivel ${character.level} ${character.primaryClass}, HP ${character.currentHp}/${character.maxHp}), dice/hace: "${currentActionText}". ` +
+        (isInCombat ? `En combate contra ${enemies.filter(e=>e.currentHp > 0).map(e=>e.name).join(', ')}. ` : '') +
+        `Describe el resultado o la respuesta del mundo/NPCs. Si es una acción que merece XP, usa [XP_AWARDED:Cantidad]. Si encuentra un objeto, [FOUND_ITEM:NombreExactoDelCatalogo]. Si encuentra oro, [LOOT_GOLD:Cantidad].`;
+    handleGeminiResponse(promptForDM);
+  }, [userInput, isDMThinking, character, currentScene, currentSceneId, gameScreenApi, handleGeminiResponse, isPlayerTurn, isInCombat, enemies, setUserInput /*setPlayerTookActionThisTurn - not needed as dep if only setting*/]);
+
+  const handleSceneOptionSelect = useCallback(async (option: SceneOption) => {
+    const optionText = typeof option.text === 'function' ? option.text(character) : option.text;
+    if (addMessageRef.current) addMessageRef.current(`Elegiste: ${optionText}`, 'user');
+    
+    if (option.onSelect) {
+        await option.onSelect(character, gameScreenApi);
+    }
+
+    switch (option.actionType) {
+        case 'moveToNode':
+            if (option.targetNodeId) setCurrentSceneId(option.targetNodeId);
+            break;
+        case 'skillCheck':
+            if (option.skillCheckDetails) {
+                setShowEnvironmentalSkillCheckModal({
+                    skill: option.skillCheckDetails.skill,
+                    ability: SKILL_TO_ABILITY_MAP[option.skillCheckDetails.skill] || 'int',
+                    actionDescription: optionText,
+                    sceneOption: option 
+                });
+                setSkillCheckTargetDC(option.skillCheckDetails.dc);
+                setSkillCheckHasAdvantage(option.skillCheckDetails.advantage || false);
+                setSkillCheckHasDisadvantage(option.skillCheckDetails.disadvantage || false);
+            }
+            break;
+        case 'combat':
+            if (option.combatDetails) {
+                handleInitiateCombat(option.combatDetails.enemyGroupIds, option.combatDetails.victoryNodeId, option.combatDetails.defeatNodeId, option.combatDetails.combatDescription);
+            }
+            break;
+        case 'openShop':
+            if (option.shopId) handleOpenShop(option.shopId);
+            break;
+        case 'rest':
+            if(option.restDetails) handleRest(option.restDetails);
+            break;
+        default:
+            if (option.targetNodeId) {
+                setCurrentSceneId(option.targetNodeId);
+            } else {
+                 const sceneDesc = typeof currentScene?.description === 'function' 
+                    ? currentScene.description(character, gameScreenApi) 
+                    : currentScene?.description;
+                 const promptForDM = `El jugador, ${character.name}, eligió la opción: "${optionText}". En la escena "${currentScene?.title || currentSceneId} - ${sceneDesc}". Describe el resultado.`;
+                 handleGeminiResponse(promptForDM);
+            }
+    }
+  }, [character, gameScreenApi, setCurrentSceneId, setShowEnvironmentalSkillCheckModal, setSkillCheckTargetDC, setSkillCheckHasAdvantage, setSkillCheckHasDisadvantage, handleInitiateCombat, handleOpenShop, handleRest, currentScene, currentSceneId, handleGeminiResponse]);
 
 
   return (
